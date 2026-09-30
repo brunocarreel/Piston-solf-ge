@@ -121,7 +121,7 @@ main{flex:1;overflow-y:auto;padding:6px 16px 24px;-webkit-overflow-scrolling:tou
 .actions{display:flex;gap:8px;flex-wrap:wrap;justify-content:center;margin:10px 0}
 .pad{width:100%;height:140px;border-radius:24px;border:3px solid var(--brass-lo);cursor:pointer;
   background:radial-gradient(circle at 50% 35%,var(--brass-hi),var(--brass) 55%,var(--brass-lo));
-  color:var(--onbrass);font-family:var(--display);font-weight:800;font-size:22px;touch-action:none;user-select:none;-webkit-user-select:none;
+  color:var(--onbrass);font-family:var(--display);font-weight:800;font-size:22px;touch-action:none;user-select:none;-webkit-user-select:none;-webkit-touch-callout:none;
   box-shadow:inset 0 -6px 0 rgba(0,0,0,.18)}
 .pad.down{transform:translateY(3px);box-shadow:inset 0 -2px 0 rgba(0,0,0,.18)}
 .pad:disabled{filter:saturate(.35);opacity:.6;cursor:default}
@@ -303,8 +303,8 @@ const KEY='pistons-v2';
 const DEF={prog:{},seen:{},tempo:{},latAdj:0,pitch:'ecrit',valves:'1',inst:'trompette',unlock:'0',
   train:{r:1,mode:'quiz',n:0,ok:0,streak:0,best:0},metro:{bpm:80,ts:'4/4',sub:0,acc:true}};
 let S=load();
-function load(){try{const r=localStorage.getItem(KEY);if(r){const o=JSON.parse(r);const d=structuredClone(DEF);
-  for(const k in o){d[k]=(typeof d[k]==='object'&&!Array.isArray(d[k])&&d[k])?Object.assign(d[k],o[k]):o[k];}return d;}}catch(e){}return structuredClone(DEF);}
+function load(){try{const r=localStorage.getItem(KEY);if(r){const o=JSON.parse(r);const d=JSON.parse(JSON.stringify(DEF));
+  for(const k in o){d[k]=(typeof d[k]==='object'&&!Array.isArray(d[k])&&d[k])?Object.assign(d[k],o[k]):o[k];}return d;}}catch(e){}return JSON.parse(JSON.stringify(DEF));}
 function save(){try{localStorage.setItem(KEY,JSON.stringify(S));}catch(e){}}
 const $=s=>document.querySelector(s);
 const rnd=n=>Math.floor(Math.random()*n);
@@ -325,7 +325,7 @@ function ac(){
     conv.buffer=buf;MASTER.connect(comp);MASTER.connect(conv);conv.connect(wet);wet.connect(comp);comp.connect(AC.destination);
     NOISE=AC.createBuffer(1,AC.sampleRate,AC.sampleRate);const nd=NOISE.getChannelData(0);for(let i=0;i<nd.length;i++)nd[i]=Math.random()*2-1;
   }
-  if(AC.state==='suspended')AC.resume();
+  if(AC.state!=='running'){try{AC.resume();}catch(e){}}
   return AC;
 }
 const INSTR={trompette:'Trompette',piano:'Piano',flute:'Flûte',clarinette:'Clarinette',violon:'Violon',xylo:'Xylophone'};
@@ -391,11 +391,18 @@ function later(fn,ms){const id=setTimeout(fn,Math.max(0,ms));TIMERS.push(id);ret
 function stopAll(){TIMERS.forEach(clearTimeout);TIMERS=[];[...LIVE].forEach(v=>v.stop());}
 const atAudio=(t,fn)=>later(fn,(t-AC.currentTime)*1000);
 // instant (en temps audio) de ce que l'oreille entend au moment d'un geste
+// horloge commune : on relie l'horloge audio à performance.now() au moment où elle avance
+let SYNC=null;
+function syncClock(){
+  if(!AC)return;const c0=AC.currentTime,lim=performance.now()+25;let c=c0,p=performance.now();
+  while(c===c0&&p<lim){c=AC.currentTime;p=performance.now();}
+  SYNC={ctx:c,perf:p};
+}
 function tapTime(evTs){
-  const now=performance.now(),ts=(evTs&&evTs>0&&evTs<=now+5)?evTs:now;
-  if(AC.getOutputTimestamp){const o=AC.getOutputTimestamp();
-    if(o&&o.performanceTime>0)return o.contextTime+(ts-o.performanceTime)/1000-(S.latAdj||0)/1000;}
-  return AC.currentTime-(AC.outputLatency||AC.baseLatency||0)-(now-ts)/1000-(S.latAdj||0)/1000;
+  const now=performance.now();const ts=(typeof evTs==='number'&&Math.abs(now-evTs)<300)?evTs:now;
+  if(!SYNC||now-SYNC.perf>20000)syncClock();
+  const out=(AC.outputLatency||AC.baseLatency||0);
+  return SYNC.ctx+(ts-SYNC.perf)/1000-out-(S.latAdj||0)/1000;
 }
 
 /* =============== théorie =============== */
@@ -622,7 +629,7 @@ function drawNote(host,d,sp=14){
 // evs: événements ; opts: ts,bpm,countIn,metro,pitch(e)->d|null,onNote(i,on),breaths:Set
 function playEvents(evs,o){
   stopAll();const c=ac();const T=TS[o.ts||'4/4'];const beat=60/o.bpm,tick=beat/T.beat;
-  const t0=c.currentTime+.12;const ci=o.countIn?T.beats:0;const start=t0+ci*beat;
+  const t0=c.currentTime+(c.state==='running'?.12:.35);const ci=o.countIn?T.beats:0;const start=t0+ci*beat;
   const total=Math.max(...evs.map(e=>e.t+e.d));const end=start+total*tick;
   if(o.countIn||o.metro){
     const nb=ci+(o.metro?Math.round(total/T.beat):0);
@@ -634,6 +641,7 @@ function playEvents(evs,o){
     if(o.breaths&&o.breaths.has(i))dur=Math.max(e.d*tick-beat*.5,e.d*tick*.4);
     const d=o.pitch?o.pitch(e,i):G4;if(o.sound!==false)play(noteHz(d),t,dur);
     if(o.onNote){atAudio(t,()=>o.onNote(i,true));atAudio(t+dur,()=>o.onNote(i,false));}});
+  atAudio(Math.max(t0,start-.3),syncClock);
   if(o.onEnd)atAudio(end+.05,o.onEnd);
   return {start,end,beat,tick};
 }
@@ -947,7 +955,7 @@ function rhythmItem(it,s){
   const ms=genRhythm({...it,avoid:RUN.lastR});RUN.lastR=ms.map(r=>r.join()).join('|');
   const evs=cellsToEvents(ms),T=TS[it.ts];
   kick(s,it.hold?'Notes tenues':'Lecture rythmique');
-  s.appendChild(h('p',{class:'small',style:'margin:0'},it.hold?'Appuie au début de chaque note et relâche pile à la fin de sa durée.':'Frappe au début de chaque note, pas pendant les silences.'));
+  s.appendChild(h('p',{class:'small',style:'margin:0'},it.hold?'Appuie au début de chaque note et tiens-la jusqu’au temps suivant, sans la couper avant.':'Frappe au début de chaque note, pas pendant les silences.'));
   const st=h('div',{class:'stave'});s.appendChild(st);
   const info=drawScore(st,{events:evs,ts:it.ts,staff:'one',perRow:it.perRow||Math.min(2,ms.length)});
   const light=beatsRow(s,T.beats);
@@ -970,9 +978,16 @@ function rhythmItem(it,s){
   const down=(id='key',ts)=>{if(!rec||held.has(id))return;const tap={t:tapTime(ts),up:null};rec.taps.push(tap);held.set(id,{tap,v:voice(noteHz(G4))});pad.classList.add('down');};
   const up=(id='key',ts)=>{const hh=held.get(id);if(!hh)return;hh.tap.up=tapTime(ts);hh.v.stop();held.delete(id);if(!held.size)pad.classList.remove('down');};
   const upAll=()=>[...held.keys()].forEach(k=>up(k));
-  pad.addEventListener('pointerdown',e=>{e.preventDefault();try{pad.setPointerCapture(e.pointerId);}catch(_){}down(e.pointerId,e.timeStamp);});
-  pad.addEventListener('pointerup',e=>up(e.pointerId,e.timeStamp));pad.addEventListener('pointercancel',e=>up(e.pointerId,e.timeStamp));
-  pad.addEventListener('lostpointercapture',e=>up(e.pointerId,e.timeStamp));
+  if(window.PointerEvent){
+    pad.addEventListener('pointerdown',e=>{e.preventDefault();try{pad.setPointerCapture(e.pointerId);}catch(_){}down(e.pointerId,e.timeStamp);});
+    pad.addEventListener('pointerup',e=>up(e.pointerId,e.timeStamp));pad.addEventListener('pointercancel',e=>up(e.pointerId,e.timeStamp));
+    pad.addEventListener('touchstart',e=>e.preventDefault(),{passive:false});
+  }else{ // anciens navigateurs sans Pointer Events
+    pad.addEventListener('touchstart',e=>{e.preventDefault();[...e.changedTouches].forEach(t=>down('t'+t.identifier));},{passive:false});
+    pad.addEventListener('touchend',e=>{e.preventDefault();[...e.changedTouches].forEach(t=>up('t'+t.identifier));},{passive:false});
+    pad.addEventListener('touchcancel',e=>[...e.changedTouches].forEach(t=>up('t'+t.identifier)));
+    pad.addEventListener('mousedown',()=>down('m'));pad.addEventListener('mouseup',()=>up('m'));
+  }
   pad.addEventListener('contextmenu',e=>e.preventDefault());
   RUN.pad={down,up};
   function evaluate(){
@@ -984,17 +999,24 @@ function rhythmItem(it,s){
     exp.forEach(e=>{let bj=-1,bd=9;taps.forEach((tp,j)=>{const dd=Math.abs(tp.t-e.t);if(!used.has(j)&&dd<tol&&dd<bd){bd=dd;bj=j;}});
       if(bj<0){colorEv(info,e.i,'note-bad');let nd=null;taps.forEach(tp=>{const dd=tp.t-e.t;if(Math.abs(dd)<.4&&(nd===null||Math.abs(dd)<Math.abs(nd)))nd=dd;});if(nd!==null)near.push(nd);return;}
       used.add(bj);hits++;dts.push(taps[bj].t-e.t);let ok=true;
-      if(it.hold){const upT=taps[bj].up??(start+99),rt=Math.max(.16,tol*1.6);
-        if(upT<e.end-rt){early++;ok=false;}else if(upT>e.end+rt){late++;ok=false;}else holdOK++;}
+      if(it.hold){ // tenue : on vérifie surtout qu'on ne coupe pas trop tôt
+        const tp=taps[bj],upT=tp.up??(start+99),dur=e.end-e.t,held=(upT-tp.t)/dur;
+        const nxt=exp.find(x=>x.t>=e.end-1e-6&&x.t<e.end+1e-6);
+        const lateTol=nxt?Math.min(.3,pl.beat*.35):pl.beat*.5;
+        if(upT>e.end+lateTol){late++;holdOK+=.5;ok=false;}
+        else if(held>=.8)holdOK++;
+        else if(held>=.6){holdOK+=.5;early++;ok=false;}
+        else{early++;ok=false;}}
       colorEv(info,e.i,ok?'note-ok':'note-bad');});
     const extra=taps.length-used.size;
     let sc=it.hold?(hits*.6+holdOK*.4)/exp.length:hits/exp.length;sc=clamp(sc-.15*extra,0,1);
     best=Math.max(best,attempts===1?sc:sc*.8);
     const I=RUN.info;I.bias.push(...dts);I.extra+=extra;I.early+=early;I.late+=late;
     const mean=dts.length?dts.reduce((a,b)=>a+b,0)/dts.length*1000:0;
+    if(!taps.length){res.innerHTML='Aucune frappe détectée. Touche bien le piston doré après le décompte. Si le problème continue, dis-le-moi en précisant ton modèle d’iPad.';bP.textContent='Réessayer';bN.style.display='';return;}
     let msg=sc>=.999?'<b style="color:var(--ok)">Parfait, tout est en place !</b>':`${hits} note${hits>1?'s':''} en place sur ${exp.length}`;
     if(extra)msg+=`, ${extra} frappe${extra>1?'s':''} en trop`;
-    if(it.hold&&(early||late))msg+=`. ${early?`${early} relâchée${early>1?'s':''} trop tôt`:''}${early&&late?', ':''}${late?`${late} tenue${late>1?'s':''} trop longtemps`:''}`;
+    if(it.hold&&(early||late))msg+=`. ${early?`${early} note${early>1?'s':''} coupée${early>1?'s':''} trop tôt`:''}${early&&late?', ':''}${late?`${late} tenue${late>1?'s':''} au-delà du temps suivant`:''}`;
     if(near.length){const m2=near.reduce((a,b)=>a+b,0)/near.length*1000;msg+=`. ${near.length===1?'Une note jouée':near.length+' notes jouées'} un peu trop ${m2>0?'tard':'tôt'} (≈ ${Math.round(Math.abs(m2))} ms)`;}
     if(Math.abs(mean)>35&&sc<1)msg+=`. Tu es plutôt ${mean>0?'en retard':'en avance'} (${Math.round(Math.abs(mean))} ms).`;
     res.innerHTML=msg;bP.textContent='Réessayer';bN.style.display='';bN.className=sc>=.999?'btn brass':'btn';
@@ -1274,11 +1296,11 @@ $('#svalves').onchange=e=>{S.valves=e.target.value;save();};
 $('#slat').oninput=e=>{S.latAdj=+e.target.value;$('#slatv').textContent=(S.latAdj>0?'+':'')+S.latAdj+' ms';save();};
 // calibrage : 4 clics de décompte puis 12 clics à taper
 $('#scal').onclick=()=>{stopAll();metroStop();const c=ac(),pad=$('#scalpad'),res=$('#scalres');
-  const beat=60/90,t0=c.currentTime+.3,N=16,taps=[];const saved=S.latAdj;S.latAdj=0;
+  const beat=60/90,t0=c.currentTime+.4,N=16,taps=[];const saved=S.latAdj;S.latAdj=0;atAudio(t0,syncClock);
   for(let i=0;i<N;i++)click(t0+i*beat,i<4?2:1);
   pad.style.display='';$('#scal').disabled=true;res.textContent='Écoute 4 clics, puis tape sur chacun des suivants.';
-  const tp=e=>{e.preventDefault();taps.push(tapTime(e.timeStamp));};pad.addEventListener('pointerdown',tp);
-  atAudio(t0+N*beat+.4,()=>{pad.removeEventListener('pointerdown',tp);pad.style.display='none';$('#scal').disabled=false;
+  const ev=window.PointerEvent?'pointerdown':'touchstart';const tp=e=>{e.preventDefault();taps.push(tapTime(e.timeStamp));};pad.addEventListener(ev,tp,{passive:false});
+  atAudio(t0+N*beat+.4,()=>{pad.removeEventListener(ev,tp,{passive:false});pad.style.display='none';$('#scal').disabled=false;
     const d=[];for(let i=4;i<N;i++){const ct=t0+i*beat;let b=null;taps.forEach(t=>{const x=t-ct;if(Math.abs(x)<.3&&(b===null||Math.abs(x)<Math.abs(b)))b=x;});if(b!==null)d.push(b);}
     if(d.length<6){S.latAdj=saved;res.textContent='Pas assez de frappes détectées : recommence en tapant sur chaque clic.';return;}
     d.sort((a,b)=>a-b);const med=d[Math.floor(d.length/2)]*1000;
